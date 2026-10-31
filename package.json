@@ -1,0 +1,107 @@
+{
+  "name": "smart-contract-parser",
+  "displayName": "Smart Contract Parser",
+  "description": "Parses a verified smart contract ABI from Etherscan and generates Python wrapper methods",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.144.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "smart-contract-parser.generateMethods",
+        "title": "Smart Contracts: Generate Methods",
+        "icon": "$(add)"
+      },
+      {
+        "command": "smart-contract-parser.removeContract",
+        "title": "Smart Contracts: Remove Contract",
+        "icon": "$(close)"
+      },
+      {
+        "command": "smart-contract-parser.refreshTree",
+        "title": "Smart Contracts: Refresh",
+        "icon": "$(refresh)"
+      }
+    ],
+    "configuration": {
+      "title": "Smart Contract Parser",
+      "properties": {
+        "smart-contract-parser.etherscanApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Бесплатный API-ключ Etherscan (получить: etherscan.io → Settings → API keys)"
+        },
+        "smart-contract-parser.pythonPath": {
+          "type": "string",
+          "default": "python3",
+          "description": "Путь до интерпретатора Python (например, python3 или C:\\Python313\\python.exe)"
+        }
+      }
+    },
+    "views": {
+      "explorer": [
+        {
+          "id": "smartContractExplorer",
+          "name": "Smart Contracts"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "smart-contract-parser.generateMethods",
+          "when": "view == smartContractExplorer",
+          "group": "navigation@1"
+        },
+        {
+          "command": "smart-contract-parser.refreshTree",
+          "when": "view == smartContractExplorer",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "smart-contract-parser.removeContract",
+          "when": "view == smartContractExplorer && viewItem == contract",
+          "group": "inline"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "npm run check-types && npm run lint && node esbuild.js",
+    "watch": "npm-run-all -p watch:*",
+    "watch:esbuild": "node esbuild.js --watch",
+    "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+    "package": "npm run check-types && npm run lint && node esbuild.js --production",
+    "compile-tests": "tsc -p . --outDir out",
+    "watch-tests": "tsc -p . -w --outDir out",
+    "pretest": "npm run compile-tests && npm run compile && npm run lint",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint src",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.144.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "24.x",
+    "typescript-eslint": "^8.61.1",
+    "eslint": "^10.5.0",
+    "esbuild": "^0.28.1",
+    "npm-run-all": "^4.1.5",
+    "typescript": "^6.0.3",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.0.0"
+  },
+  "overrides": {
+    "diff": "^8.0.4",
+    "serialize-javascript": "^7.0.6"
+  }
+}
