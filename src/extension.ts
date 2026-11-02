@@ -216,7 +216,7 @@ async function askNetwork(): Promise<{ id: number; name: string } | undefined> {
 
 async function askAddress(): Promise<string | undefined> {
 	const entered = await vscode.window.showInputBox({
-		prompt: 'Адрес смарт-контракта в сети Ethereum mainnet',
+		prompt: 'Адрес смарт-контракта в выбранной сети',
 		placeHolder: '0x…',
 		validateInput: (value) =>
 			/^0[xX][0-9a-fA-F]{40}$/.test(value.trim())

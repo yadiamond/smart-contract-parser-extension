@@ -6,21 +6,21 @@ import keyword
 import os
 import re
 import sys
-import urllib.error
-import urllib.request
 from pprint import pformat
+
+import requests
 
 ETHERSCAN_API = "https://api.etherscan.io/v2/api"
 
-CHAINS = {
-    1: {"name": "Ethereum", "rpc": "https://ethereum-rpc.publicnode.com"},
-    11155111: {"name": "Sepolia", "rpc": "https://ethereum-sepolia-rpc.publicnode.com"},
-    56: {"name": "BNB Smart Chain", "rpc": "https://bsc-rpc.publicnode.com"},
-    137: {"name": "Polygon", "rpc": "https://polygon-bor-rpc.publicnode.com"},
-    42161: {"name": "Arbitrum One", "rpc": "https://arbitrum-one-rpc.publicnode.com"},
-    8453: {"name": "Base", "rpc": "https://base-rpc.publicnode.com"},
-    10: {"name": "Optimism", "rpc": "https://optimism-rpc.publicnode.com"},
-    43114: {"name": "Avalanche", "rpc": "https://avalanche-cchain-rpc.publicnode.com"},
+CHAIN_NAMES = {
+    1: "Ethereum",
+    11155111: "Sepolia",
+    56: "BNB Smart Chain",
+    137: "Polygon",
+    42161: "Arbitrum One",
+    8453: "Base",
+    10: "Optimism",
+    43114: "Avalanche",
 }
 
 
@@ -32,7 +32,7 @@ def fail(message):
 def to_python_identifier(name):
     ident = re.sub(r"\W", "_", name or "")
     if not ident:
-        ident = "func"
+        ident = "arg"
     if ident[0].isdigit():
         ident = "_" + ident
     if keyword.iskeyword(ident):
@@ -40,10 +40,58 @@ def to_python_identifier(name):
     return ident
 
 
-def python_param_name(input_name, index):
-    if not input_name:
-        return "arg{}".format(index)
-    return to_python_identifier(input_name)
+def unique_identifier(base_name, used_names):
+    name = base_name
+    suffix = 2
+    while name in used_names:
+        name = "{}_{}".format(base_name, suffix)
+        suffix += 1
+    used_names.add(name)
+    return name
+
+
+def fetch_contract_data(address, api_key, chain_id):
+    try:
+        response = requests.get(
+            ETHERSCAN_API,
+            params={
+                "chainid": chain_id,
+                "module": "contract",
+                "action": "getsourcecode",
+                "address": address,
+                "apikey": api_key,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+    except requests.HTTPError:
+        fail("Etherscan вернул HTTP-ошибку {}".format(response.status_code))
+    except requests.RequestException as exc:
+        fail("Нет доступа к Etherscan: {}".format(type(exc).__name__))
+    try:
+        payload = response.json()
+    except ValueError:
+        fail("Etherscan вернул ответ, не являющийся JSON")
+
+    if payload.get("status") != "1":
+        detail = payload.get("result") or payload.get("message") or "неизвестная ошибка"
+        fail("Etherscan: {}".format(detail))
+
+    matched_contracts = payload.get("result") or []
+    if not matched_contracts:
+        fail("Etherscan вернул пустой ответ для {}".format(address))
+    contract_info = matched_contracts[0]
+
+    abi_raw = contract_info.get("ABI") or ""
+    if not abi_raw or abi_raw == "Contract source code not verified":
+        fail("Контракт {} не верифицирован на Etherscan — ABI недоступен".format(address))
+    try:
+        abi = json.loads(abi_raw)
+    except json.JSONDecodeError:
+        fail("Не удалось разобрать ABI, полученный от Etherscan для {}".format(address))
+    if not isinstance(abi, list):
+        fail("ABI контракта {} имеет неожиданный формат".format(address))
+    return contract_info, abi
 
 
 def fetch_abi(address, api_key, abi_file, chain_id):
@@ -55,43 +103,31 @@ def fetch_abi(address, api_key, abi_file, chain_id):
             fail("Не удалось открыть файл ABI: {}".format(exc))
         except json.JSONDecodeError:
             fail("Файл ABI не является корректным JSON")
+
+        contract_name = ""
         if isinstance(loaded, dict):
+            contract_name = loaded.get("ContractName") or loaded.get("name") or ""
             loaded = loaded.get("abi", [])
         if not isinstance(loaded, list):
             fail("В файле ABI должен лежать JSON-массив (или объект с полем abi)")
-        return loaded, ""
+        return loaded, contract_name
 
-    request_url = "{}?chainid={}&module=contract&action=getsourcecode&address={}&apikey={}".format(
-        ETHERSCAN_API, chain_id, address, api_key)
-    try:
-        with urllib.request.urlopen(request_url, timeout=30) as response:
-            payload = json.load(response)
-    except urllib.error.HTTPError as exc:
-        fail("Etherscan вернул HTTP-ошибку {}".format(exc.code))
-    except urllib.error.URLError as exc:
-        fail("Нет доступа к Etherscan: {}".format(exc.reason))
-    except json.JSONDecodeError:
-        fail("Etherscan вернул ответ, не являющийся JSON")
-
-    if payload.get("status") != "1":
-        detail = payload.get("result") or payload.get("message") or "неизвестная ошибка"
-        fail("Etherscan: {}".format(detail))
-
-    matched_contracts = payload.get("result") or []
-    if not matched_contracts:
-        fail("Etherscan вернул пустой ответ")
-    contract_info = matched_contracts[0]
-
-    abi_raw = contract_info.get("ABI") or ""
+    contract_info, abi = fetch_contract_data(address, api_key, chain_id)
     contract_name = (contract_info.get("ContractName") or "").strip()
-    if not abi_raw or abi_raw == "Contract source code not verified":
-        fail("Контракт не верифицирован на Etherscan — ABI недоступен")
-    try:
-        abi = json.loads(abi_raw)
-    except json.JSONDecodeError:
-        fail("Не удалось разобрать ABI, полученный от Etherscan")
-    if not isinstance(abi, list):
-        fail("ABI имеет неожиданный формат")
+    implementation = (contract_info.get("Implementation") or "").strip()
+    visited_addresses = {address.lower()}
+
+    while implementation and implementation.lower() != "0x" + "0" * 40:
+        if not re.fullmatch(r"0[xX][0-9a-fA-F]{40}", implementation):
+            fail("Etherscan вернул некорректный адрес implementation: {}".format(implementation))
+        if implementation.lower() in visited_addresses:
+            fail("Обнаружен циклический адрес implementation: {}".format(implementation))
+
+        contract_info, implementation_abi = fetch_contract_data(implementation, api_key, chain_id)
+        abi = merge_abis(abi, implementation_abi)
+        visited_addresses.add(implementation.lower())
+        implementation = (contract_info.get("Implementation") or "").strip()
+
     return abi, contract_name
 
 
@@ -101,124 +137,137 @@ def safe_contract_name(name, address):
         cleaned = "Contract_" + address[2:12]
     if cleaned[0].isdigit():
         cleaned = "Contract_" + cleaned
+    if keyword.iskeyword(cleaned):
+        cleaned = "Contract_" + cleaned
     return cleaned
 
 
-def generate_wrapper_file(abi, contract_name, address, out_dir, chain_name, rpc_url):
-    function_entries = [entry for entry in abi if isinstance(entry, dict) and entry.get("type") == "function"]
+def canonical_abi_type(input_definition):
+    abi_type = input_definition.get("type") or ""
+    if not abi_type.startswith("tuple"):
+        return abi_type
+    components = input_definition.get("components") or []
+    component_types = ",".join(canonical_abi_type(component) for component in components)
+    return "({}){}".format(component_types, abi_type[len("tuple"):])
+
+
+def merge_abis(*abis):
+    merged = []
+    seen_entries = set()
+
+    for abi in abis:
+        for entry in abi:
+            if isinstance(entry, dict) and entry.get("type") == "function":
+                inputs = entry.get("inputs") or []
+                signature = "{}({})".format(
+                    entry.get("name") or "",
+                    ",".join(canonical_abi_type(input_definition) for input_definition in inputs),
+                )
+                entry_key = "function:{}".format(signature)
+            else:
+                entry_key = json.dumps(entry, sort_keys=True, ensure_ascii=False)
+
+            if entry_key not in seen_entries:
+                seen_entries.add(entry_key)
+                merged.append(entry)
+
+    return merged
+
+
+def generate_wrapper_file(abi, contract_name, address, out_dir, chain_name):
+    function_entries = [
+        entry for entry in abi
+        if isinstance(entry, dict) and entry.get("type") == "function"
+    ]
     if not function_entries:
         fail("В ABI нет ни одной функции — генерировать нечего")
 
     class_name = safe_contract_name(contract_name, address)
-    has_view_functions = any(entry.get("stateMutability") in ("view", "pure") for entry in function_entries)
     lines = []
     line_number = 0
     function_reports = []
-    used_method_names = set()
-    demo_method = None
+    used_method_names = {"__init__", "_send_transaction"}
 
     def add(line=""):
         nonlocal line_number
         lines.append(line)
-        line_number += line.count("\n") + 1
+        line_number += 1
 
-    if has_view_functions:
-        add("import asyncio")
-        add("")
     add("from web3 import AsyncWeb3")
-    if has_view_functions:
-        add("from web3.providers.rpc import AsyncHTTPProvider")
     add("from eth_utils.address import to_checksum_address")
     add("")
-    add('RPC_URL = "{}"'.format(rpc_url))
-    add("")
     add('PRIVATE_KEY = ""')
-    add("")
-    add('TOKEN_ADDRESS = "{}"'.format(address))
-    add("")
+    add("CONTRACT_ADDRESS = {!r}".format(address))
     add("CONTRACT_ABI = {}".format(pformat(abi, indent=1, width=110, sort_dicts=False)))
     add("")
     add("")
     add("class {}:".format(class_name))
-    add("")
-    add("    def __init__(self, web3: AsyncWeb3, private_key: str = PRIVATE_KEY, token_address: str = TOKEN_ADDRESS):")
+    add("    def __init__(")
+    add("        self,")
+    add("        web3: AsyncWeb3,")
+    add("        private_key: str = PRIVATE_KEY,")
+    add("        contract_address: str = CONTRACT_ADDRESS,")
+    add("    ):")
     add("        self.web3 = web3")
     add("        self.private_key = private_key")
     add("        self.address = web3.eth.account.from_key(private_key).address if private_key else None")
-    add("        self.token_contract = web3.eth.contract(address=to_checksum_address(token_address), abi=CONTRACT_ABI)")
+    add("        self.contract = web3.eth.contract(")
+    add("            address=to_checksum_address(contract_address),")
+    add("            abi=CONTRACT_ABI,")
+    add("        )")
     add("")
     add("    async def _send_transaction(self, function_call, msg_value: int = 0):")
     add("        if self.address is None:")
     add('            raise RuntimeError("PRIVATE_KEY не задан — отправка транзакций недоступна")')
-    add("        tx_params = {")
-    add("            'from': self.address,")
-    add("            'nonce': await self.web3.eth.get_transaction_count(self.address),")
-    add("            'gasPrice': await self.web3.eth.gas_price,")
-    add("            'value': int(msg_value),")
-    add("        }")
-    add("        transaction = function_call.build_transaction(tx_params)")
-    add("        tx_params['gas'] = int(await self.web3.eth.estimate_gas(transaction) * 1.2)")
+    add("        transaction = await function_call.build_transaction({")
+    add('            "from": self.address,')
+    add('            "nonce": await self.web3.eth.get_transaction_count(self.address),')
+    add('            "gasPrice": await self.web3.eth.gas_price,')
+    add('            "value": int(msg_value),')
+    add("        })")
+    add('        transaction["gas"] = int(await self.web3.eth.estimate_gas(transaction) * 1.2)')
     add("        signed = self.web3.eth.account.sign_transaction(transaction, self.private_key)")
     add("        return await self.web3.eth.send_raw_transaction(signed.raw_transaction)")
 
     for entry in function_entries:
-        raw_name = entry.get("name") or "func"
+        raw_name = entry.get("name") or "function"
         mutability = entry.get("stateMutability") or "nonpayable"
         is_view = mutability in ("view", "pure")
         is_payable = mutability == "payable"
         inputs = entry.get("inputs") or []
 
-        base_name = to_python_identifier(raw_name)
-        method_name = base_name
-        collision_suffix = 2
-        while method_name in used_method_names:
-            method_name = "{}_{}".format(base_name, collision_suffix)
-            collision_suffix += 1
-        used_method_names.add(method_name)
-        if is_view and demo_method is None:
-            demo_method = method_name
-
+        method_name = unique_identifier(to_python_identifier(raw_name), used_method_names)
+        used_param_names = {"self", "msg_value"}
         param_names = []
-        for index, input_def in enumerate(inputs):
-            param_name = python_param_name(input_def.get("name") or "", index)
-            if param_name == "self":
-                param_name += "_"
-            param_names.append(param_name)
-        call_args = ", ".join(param_names)
+        for index, input_definition in enumerate(inputs):
+            base_name = to_python_identifier(input_definition.get("name") or "arg{}".format(index))
+            param_names.append(unique_identifier(base_name, used_param_names))
 
         def_params = ["self"] + param_names
         if is_payable:
             def_params.append("msg_value: int = 0")
 
+        abi_signature = "{}({})".format(
+            raw_name,
+            ",".join(canonical_abi_type(input_definition) for input_definition in inputs),
+        )
+        call_args = ", ".join(param_names)
+
         add("")
         add("    async def {}({}):".format(method_name, ", ".join(def_params)))
         function_reports.append({
-            "signature": "{}({})".format(method_name, call_args),
+            "signature": "{}({})".format(method_name, ", ".join(def_params[1:])),
             "kind": "view" if is_view else "tx",
             "line": line_number,
         })
+        add("        function_call = self.contract.get_function_by_signature({!r})({})".format(
+            abi_signature, call_args))
         if is_view:
-            add("        return await self.token_contract.functions.{}({}).call()".format(raw_name, call_args))
+            add("        return await function_call.call()")
+        elif is_payable:
+            add("        return await self._send_transaction(function_call, msg_value=msg_value)")
         else:
-            send_extra_args = ", msg_value" if is_payable else ""
-            add("        return await self._send_transaction(self.token_contract.functions.{}({}){})".format(
-                raw_name, call_args, send_extra_args))
-
-    if demo_method:
-        add("")
-        add("")
-        add('if __name__ == "__main__":')
-        add("")
-        add("    async def _demo():")
-        add("        w3 = AsyncWeb3(AsyncHTTPProvider(RPC_URL))")
-        add("        contract = {}(w3)".format(class_name))
-        add("        try:")
-        add('            print("{}() =", await contract.{}())'.format(demo_method, demo_method))
-        add("        except Exception as error:")
-        add('            print("Не удалось вызвать {}(), впишите RPC_URL и проверьте адрес:", error)'.format(demo_method))
-        add("")
-        add("    asyncio.run(_demo())")
-        add("")
+            add("        return await self._send_transaction(function_call)")
 
     output_path = os.path.join(out_dir, "{}_methods.py".format(class_name))
     try:
@@ -244,7 +293,7 @@ def main():
     parser.add_argument("--apikey", default="", help="API-ключ Etherscan")
     parser.add_argument("--out", default=".", help="Каталог для сохранения сгенерированного файла")
     parser.add_argument("--abi-file", default=None,
-                        help="Локальный JSON-файл с ABI вместо запроса к Etherscan (режим отладки)")
+                        help="Локальный JSON-файл с ABI вместо запроса к Etherscan")
     args = parser.parse_args()
 
     address = args.address.strip()
@@ -253,12 +302,9 @@ def main():
     if not args.abi_file and not args.apikey:
         fail("Не задан API-ключ Etherscan (--apikey)")
 
-    chain = CHAINS.get(args.chainid)
-    chain_name = chain["name"] if chain else "chain-{}".format(args.chainid)
-    rpc_url = chain["rpc"] if chain else ""
-
+    chain_name = CHAIN_NAMES.get(args.chainid, "chain-{}".format(args.chainid))
     abi, contract_name = fetch_abi(address, args.apikey, args.abi_file, args.chainid)
-    result = generate_wrapper_file(abi, contract_name, address, args.out, chain_name, rpc_url)
+    result = generate_wrapper_file(abi, contract_name, address, args.out, chain_name)
     print(json.dumps(result, ensure_ascii=False))
 
 
