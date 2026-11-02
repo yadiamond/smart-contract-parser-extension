@@ -94,24 +94,7 @@ def fetch_contract_data(address, api_key, chain_id):
     return contract_info, abi
 
 
-def fetch_abi(address, api_key, abi_file, chain_id):
-    if abi_file:
-        try:
-            with open(abi_file, encoding="utf-8") as abi_handle:
-                loaded = json.load(abi_handle)
-        except OSError as exc:
-            fail("Не удалось открыть файл ABI: {}".format(exc))
-        except json.JSONDecodeError:
-            fail("Файл ABI не является корректным JSON")
-
-        contract_name = ""
-        if isinstance(loaded, dict):
-            contract_name = loaded.get("ContractName") or loaded.get("name") or ""
-            loaded = loaded.get("abi", [])
-        if not isinstance(loaded, list):
-            fail("В файле ABI должен лежать JSON-массив (или объект с полем abi)")
-        return loaded, contract_name
-
+def fetch_abi(address, api_key, chain_id):
     contract_info, abi = fetch_contract_data(address, api_key, chain_id)
     contract_name = (contract_info.get("ContractName") or "").strip()
     implementation = (contract_info.get("Implementation") or "").strip()
@@ -292,18 +275,16 @@ def main():
     parser.add_argument("--chainid", type=int, default=1, help="Chain ID сети EVM (1 — Ethereum mainnet)")
     parser.add_argument("--apikey", default="", help="API-ключ Etherscan")
     parser.add_argument("--out", default=".", help="Каталог для сохранения сгенерированного файла")
-    parser.add_argument("--abi-file", default=None,
-                        help="Локальный JSON-файл с ABI вместо запроса к Etherscan")
     args = parser.parse_args()
 
     address = args.address.strip()
     if not re.fullmatch(r"0[xX][0-9a-fA-F]{40}", address):
         fail("Адрес должен начинаться с 0x и содержать 40 шестнадцатеричных символов")
-    if not args.abi_file and not args.apikey:
+    if not args.apikey:
         fail("Не задан API-ключ Etherscan (--apikey)")
 
     chain_name = CHAIN_NAMES.get(args.chainid, "chain-{}".format(args.chainid))
-    abi, contract_name = fetch_abi(address, args.apikey, args.abi_file, args.chainid)
+    abi, contract_name = fetch_abi(address, args.apikey, args.chainid)
     result = generate_wrapper_file(abi, contract_name, address, args.out, chain_name)
     print(json.dumps(result, ensure_ascii=False))
 
